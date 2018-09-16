@@ -121,8 +121,9 @@ async function doTheMagic () {
     await new Promise((resolve, reject) => {
       request(url)
         .on('error', () => {
-          error(`download of '${url}' failed!`, false)
-          reject()
+          let msg = `download of '${url}' failed!`
+          error(msg, false)
+          reject(new Error(msg))
         })
         .on('end', () => {
           resolve()
@@ -139,7 +140,7 @@ async function doTheMagic () {
 // too, and returns an array with the video data
 async function getVideoData () {
   try {
-    const [, lessonSlug] = /egghead.io\/lessons\/([^\?]*)/.exec(urlValue) || []
+    const [, lessonSlug] = /egghead.io\/lessons\/([^?]*)/.exec(urlValue) || []
     let source = await rp(urlValue)
 
     if (lessonSlug) {
