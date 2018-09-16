@@ -8,6 +8,7 @@ const PleasantProgress = require('pleasant-progress')
 const path = require('path')
 const fs = require('fs')
 const inquirer = require('inquirer')
+const puppeteer = require('puppeteer')
 
 let urlValue
 let outputDir
@@ -26,7 +27,7 @@ program
   .option('-f, --force', 'Overwriting existing files')
   .action((url, output) => {
     urlValue = url
-    outputDir = output ? path.resolve(output) : process.cwd()
+    outputDir = output ? path.resolve(output) : null
   })
 program.parse(process.argv)
 
@@ -97,31 +98,35 @@ async function doTheMagic () {
     }
   }
 
-  const videos = await getVideoData()
+  const {lessonSlug, lessonData: videos} = await getVideoData()
   if (!videos.length) {
     error('no video found!')
   }
   success(`Found ${videos.length} ${(videos.length) > 1 ? 'videos' : 'video'}`)
 
+  if (!outputDir) {
+    outputDir = path.resolve(lessonSlug)
+  }
   createOutputDirectoryIfNeeded()
 
   const padLength = String(videos.length).length
   const padZeros = '0'.repeat(padLength)
   let i = 0
-  for (const {url, filename} of videos) {
+  for (const {url, filename, code} of videos) {
     i++
     let paddedCounter = `${padZeros}${i}`.slice(-padLength)
-    const p = path.join(outputDir, (program.count ? `${paddedCounter}-${filename}` : filename))
+    const p = path.join(outputDir, (program.count ? `${paddedCounter}-${filename}.mp4` : `${filename}.mp4`))
     if (!program.force && fileExists(p)) {
       console.log(`File ${paddedCounter}-${filename} already exists, skip`)
       continue
     }
     progress.start(`Downloading video ${paddedCounter} out of ${videos.length}: '${filename}'`)
     const stream = fs.createWriteStream(p)
+    let downloadURL = await rp(url)
     await new Promise((resolve, reject) => {
-      request(url)
+      request(downloadURL)
         .on('error', () => {
-          let msg = `download of '${url}' failed!`
+          let msg = `download of '${downloadURL}' failed!`
           error(msg, false)
           reject(new Error(msg))
         })
@@ -132,8 +137,29 @@ async function doTheMagic () {
     })
     stream.close()
     progress.stop(true)
+
+    if (code) {
+      Object.keys(code).forEach(service => {
+        fs.appendFile(path.join(outputDir, `${service}.txt`), `https://github.com/${code[service].user}/${code[service].repo}/tree/${code[service].branch}\n`, err => {
+          if (err) throw err
+        })
+      })
+    }
   }
   success('Done!')
+}
+
+async function getLessionURLs (url) {
+  return (async () => {
+    const browser = await puppeteer.launch({ headless: true })
+    const page = await browser.newPage()
+    await page.setViewport({ width: 1920, height: 926 })
+    await page.goto(url)
+    let data = await page.evaluate(() => Array.from(document.querySelectorAll('.index__hoverListItem__5b00de116ebc92ec28e53feb410bf6a5')).map(link => link.href))
+    await page.close()
+    await browser.close()
+    return data
+  })()
 }
 
 // loads the url and parses it, when it's playlist/series loads the video pages
@@ -172,18 +198,7 @@ async function getVideoData () {
         error(`failed to parse the lesson page '${urlValue}'}`)
       }
     } else {
-      let lessonURLs = []
-      success('The URL is a playlist or series')
-
-      // get the urls of the lessons
-      const re = /<a class="mb2 mb0-ns base no-underline db pl0 tl f4 fw5 avenir pointer lh-title lh-copy-ns relative" data-click-handler="true" style="pointer-events:all" href="(\/lessons\/.+?)"/g
-      // regexp in js have no matchAll method or something similar..
-      let match
-      while ((match = re.exec(source))) {
-        lessonURLs.push(`https://egghead.io${match[1]}`)
-      }
-      success(`Found ${lessonURLs.length} ${(lessonURLs.length) > 1 ? 'lessons' : 'lesson'}`)
-
+      let lessonURLs = await getLessionURLs(urlValue)
       if (isPro) {
         const firstLesson = lessonURLs[0]
         const pattern = /egghead.io\/lessons\/(.*)/
@@ -193,13 +208,10 @@ async function getVideoData () {
           json: true
         })
         const { lessons } = response.list || {lessons: []}
-
-        return lessons.map((lesson) => {
-          const pattern = /https:\/\/.*\/lessons\/.*\/(.*)\?.*/
-          const [url, filename] = pattern.exec(lesson.download_url)
-          return {url, filename}
-        })
+        const lessonData = lessons.map(lesson => ({url: lesson.download_url, filename: lesson.slug, code: lesson.code}))
+        return {lessonSlug, lessonData}
       }
+
       progress.start('Fetching lesson pages')
       // fetch and process the lessons, start all requests at the same time to save time.
       const promises = lessonURLs.map(processLessonURL)
